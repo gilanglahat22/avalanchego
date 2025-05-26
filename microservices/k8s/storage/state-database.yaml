@@ -1,0 +1,332 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: state-database
+  namespace: avalanche-storage
+  labels:
+    app: state-database
+    version: v1.0.0
+spec:
+  serviceName: state-database
+  replicas: 3
+  selector:
+    matchLabels:
+      app: state-database
+  template:
+    metadata:
+      labels:
+        app: state-database
+        version: v1.0.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: avalanche-storage-service-account
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - state-database
+            topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: workload
+                operator: In
+                values:
+                - storage
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: postgres
+          containerPort: 5432
+          protocol: TCP
+        env:
+        - name: POSTGRES_DB
+          value: "avalanche_state"
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: password
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          requests:
+            cpu: 1000m
+            memory: 4Gi
+          limits:
+            cpu: 2000m
+            memory: 8Gi
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        startupProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        volumeMounts:
+        - name: state-data
+          mountPath: /var/lib/postgresql/data
+        - name: config
+          mountPath: /etc/postgresql/postgresql.conf
+          subPath: postgresql.conf
+          readOnly: true
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+          readOnly: true
+      - name: postgres-exporter
+        image: prometheuscommunity/postgres-exporter:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: metrics
+          containerPort: 9187
+          protocol: TCP
+        env:
+        - name: DATA_SOURCE_NAME
+          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:5432/avalanche_state?sslmode=disable"
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: password
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+      volumes:
+      - name: config
+        configMap:
+          name: postgres-config
+      - name: init-scripts
+        configMap:
+          name: postgres-init-scripts
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+  volumeClaimTemplates:
+  - metadata:
+      name: state-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 100Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: state-database
+  namespace: avalanche-storage
+  labels:
+    app: state-database
+spec:
+  selector:
+    app: state-database
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+    protocol: TCP
+  - name: metrics
+    port: 9187
+    targetPort: metrics
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: state-database-headless
+  namespace: avalanche-storage
+  labels:
+    app: state-database
+spec:
+  clusterIP: None
+  selector:
+    app: state-database
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+    protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: avalanche-storage
+data:
+  postgresql.conf: |
+    # PostgreSQL configuration for AvalancheGo State Database
+    
+    # Connection Settings
+    listen_addresses = '*'
+    port = 5432
+    max_connections = 200
+    
+    # Memory Settings
+    shared_buffers = 2GB
+    effective_cache_size = 6GB
+    work_mem = 64MB
+    maintenance_work_mem = 512MB
+    
+    # WAL Settings
+    wal_level = replica
+    max_wal_size = 2GB
+    min_wal_size = 1GB
+    checkpoint_completion_target = 0.9
+    
+    # Logging
+    log_destination = 'stderr'
+    logging_collector = on
+    log_directory = 'log'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_statement = 'all'
+    log_min_duration_statement = 1000
+    
+    # Performance
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    
+    # Replication
+    hot_standby = on
+    max_replication_slots = 10
+    max_wal_senders = 10
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+  namespace: avalanche-storage
+data:
+  01-init-database.sql: |
+    -- Initialize AvalancheGo State Database
+    
+    -- Create extensions
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
+    
+    -- Create schemas
+    CREATE SCHEMA IF NOT EXISTS avalanche;
+    CREATE SCHEMA IF NOT EXISTS consensus;
+    CREATE SCHEMA IF NOT EXISTS vm;
+    
+    -- Create state tables
+    CREATE TABLE IF NOT EXISTS avalanche.blocks (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        block_id VARCHAR(64) UNIQUE NOT NULL,
+        parent_id VARCHAR(64),
+        height BIGINT NOT NULL,
+        timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+        data JSONB NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    CREATE TABLE IF NOT EXISTS avalanche.transactions (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        tx_id VARCHAR(64) UNIQUE NOT NULL,
+        block_id VARCHAR(64) REFERENCES avalanche.blocks(block_id),
+        type VARCHAR(32) NOT NULL,
+        data JSONB NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    CREATE TABLE IF NOT EXISTS consensus.validators (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        node_id VARCHAR(64) UNIQUE NOT NULL,
+        stake BIGINT NOT NULL,
+        start_time TIMESTAMP WITH TIME ZONE NOT NULL,
+        end_time TIMESTAMP WITH TIME ZONE,
+        subnet_id VARCHAR(64),
+        active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    CREATE TABLE IF NOT EXISTS vm.instances (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        vm_id VARCHAR(64) UNIQUE NOT NULL,
+        chain_id VARCHAR(64) NOT NULL,
+        vm_type VARCHAR(32) NOT NULL,
+        config JSONB,
+        status VARCHAR(16) DEFAULT 'active',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    -- Create indexes
+    CREATE INDEX IF NOT EXISTS idx_blocks_height ON avalanche.blocks(height);
+    CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON avalanche.blocks(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_transactions_block_id ON avalanche.transactions(block_id);
+    CREATE INDEX IF NOT EXISTS idx_transactions_type ON avalanche.transactions(type);
+    CREATE INDEX IF NOT EXISTS idx_validators_node_id ON consensus.validators(node_id);
+    CREATE INDEX IF NOT EXISTS idx_validators_active ON consensus.validators(active);
+    CREATE INDEX IF NOT EXISTS idx_vm_instances_chain_id ON vm.instances(chain_id);
+    CREATE INDEX IF NOT EXISTS idx_vm_instances_status ON vm.instances(status);
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: avalanche-storage-service-account
+  namespace: avalanche-storage
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: state-database-pdb
+  namespace: avalanche-storage
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: state-database 

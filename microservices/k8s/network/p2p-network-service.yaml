@@ -1,0 +1,207 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: p2p-network-service
+  namespace: avalanche-network
+  labels:
+    app: p2p-network-service
+    version: v1.0.0
+spec:
+  selector:
+    matchLabels:
+      app: p2p-network-service
+  template:
+    metadata:
+      labels:
+        app: p2p-network-service
+        version: v1.0.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8084"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: avalanche-network-service-account
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+      - name: p2p-network
+        image: avalanche/p2p-network:v1.0.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8084
+          protocol: TCP
+        - name: p2p-tcp
+          containerPort: 9651
+          hostPort: 9651
+          protocol: TCP
+        - name: p2p-udp
+          containerPort: 9651
+          hostPort: 9651
+          protocol: UDP
+        env:
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: BOOTSTRAP_NODES
+          value: "node1.avalanche.network:9651,node2.avalanche.network:9651"
+        - name: MESSAGE_ROUTER_URL
+          value: "http://message-router-service.avalanche-network:8085"
+        - name: REDIS_URL
+          value: "redis://message-queue.avalanche-network:6379"
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /startup
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+          readOnly: true
+        - name: node-data
+          mountPath: /var/lib/node
+      volumes:
+      - name: config
+        configMap:
+          name: p2p-network-config
+      - name: node-data
+        hostPath:
+          path: /var/lib/avalanche/node
+          type: DirectoryOrCreate
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: p2p-network-service
+  namespace: avalanche-network
+  labels:
+    app: p2p-network-service
+spec:
+  selector:
+    app: p2p-network-service
+  ports:
+  - name: http
+    port: 8084
+    targetPort: http
+    protocol: TCP
+  - name: p2p-tcp
+    port: 9651
+    targetPort: p2p-tcp
+    protocol: TCP
+  - name: p2p-udp
+    port: 9651
+    targetPort: p2p-udp
+    protocol: UDP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: p2p-network-config
+  namespace: avalanche-network
+data:
+  p2p.yaml: |
+    network:
+      maxPeers: 100
+      bootstrapNodes:
+        - "bootstrap1.avalanche.network:9651"
+        - "bootstrap2.avalanche.network:9651"
+        - "bootstrap3.avalanche.network:9651"
+      compressionEnabled: true
+      tcpPort: 9651
+      udpPort: 9651
+      
+    discovery:
+      enabled: true
+      bootstrapTimeout: 30s
+      dialTimeout: 10s
+      
+    logging:
+      level: info
+      format: json
+      
+    metrics:
+      enabled: true
+      port: 8084
+      path: /metrics
+      
+    tracing:
+      enabled: true
+      jaegerEndpoint: "http://jaeger.avalanche-monitoring:14268/api/traces"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: avalanche-network-service-account
+  namespace: avalanche-network
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: avalanche-network-role
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: avalanche-network-role-binding
+subjects:
+- kind: ServiceAccount
+  name: avalanche-network-service-account
+  namespace: avalanche-network
+roleRef:
+  kind: ClusterRole
+  name: avalanche-network-role
+  apiGroup: rbac.authorization.k8s.io 

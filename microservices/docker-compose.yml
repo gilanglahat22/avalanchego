@@ -1,0 +1,339 @@
+version: '3.8'
+
+services:
+  # Core Blockchain Services
+  consensus-service:
+    image: avalanche/consensus-service:latest
+    build:
+      context: ./services/consensus
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      - CONSENSUS_MODE=snowman
+      - VALIDATOR_THRESHOLD=0.67
+      - REDIS_URL=redis://message-queue:6379
+      - DB_HOST=state-database
+      - DB_PORT=5432
+      - DB_NAME=avalanche_state
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+    depends_on:
+      - message-queue
+      - state-database
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  vm-manager-service:
+    image: avalanche/vm-manager:latest
+    build:
+      context: ./services/vm-manager
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - VM_REGISTRY_URL=http://vm-registry:8080
+      - MAX_VMS_PER_NODE=10
+      - REDIS_URL=redis://message-queue:6379
+      - STATE_DB_URL=postgresql://postgres:password@state-database:5432/avalanche_state
+    volumes:
+      - vm-storage:/var/lib/vms
+    depends_on:
+      - message-queue
+      - state-database
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  chain-manager-service:
+    build:
+      context: ./services/chain-manager
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      - BLOCK_DB_URL=postgresql://postgres:password@block-database:5432/avalanche_blocks
+      - CONSENSUS_SERVICE_URL=http://consensus-service:8080
+      - VM_MANAGER_URL=http://vm-manager-service:8081
+    depends_on:
+      - block-database
+      - consensus-service
+      - vm-manager-service
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  validator-service:
+    build:
+      context: ./services/validator
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8083"
+    environment:
+      - CONSENSUS_SERVICE_URL=http://consensus-service:8080
+      - P2P_SERVICE_URL=http://p2p-network-service:8084
+      - STAKING_ENABLED=true
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  # Network Services
+  p2p-network-service:
+    image: avalanche/p2p-network:latest
+    build:
+      context: ./services/p2p-network
+      dockerfile: Dockerfile
+    ports:
+      - "8084:8084"
+      - "9651:9651"
+    environment:
+      - NODE_ID=node-1
+      - BOOTSTRAP_NODES=node1.avalanche.network:9651,node2.avalanche.network:9651
+      - MESSAGE_ROUTER_URL=http://message-router-service:8085
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  message-router-service:
+    build:
+      context: ./services/message-router
+      dockerfile: Dockerfile
+    ports:
+      - "8085:8085"
+    environment:
+      - REDIS_URL=redis://message-queue:6379
+      - PEER_MANAGER_URL=http://peer-manager-service:8086
+    depends_on:
+      - message-queue
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  peer-manager-service:
+    build:
+      context: ./services/peer-manager
+      dockerfile: Dockerfile
+    ports:
+      - "8086:8086"
+    environment:
+      - MAX_PEERS=100
+      - REDIS_URL=redis://message-queue:6379
+    depends_on:
+      - message-queue
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  # Data Services
+  state-database:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=avalanche_state
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - state-db-data:/var/lib/postgresql/data
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  block-database:
+    image: postgres:15-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_DB=avalanche_blocks
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - block-db-data:/var/lib/postgresql/data
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  indexer-service:
+    build:
+      context: ./services/indexer
+      dockerfile: Dockerfile
+    ports:
+      - "8087:8087"
+    environment:
+      - BLOCK_DB_URL=postgresql://postgres:password@block-database:5432/avalanche_blocks
+      - STATE_DB_URL=postgresql://postgres:password@state-database:5432/avalanche_state
+    depends_on:
+      - state-database
+      - block-database
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  cache-service:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    volumes:
+      - cache-data:/data
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  message-queue:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - queue-data:/data
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  # Application Services
+  api-gateway:
+    image: avalanche/api-gateway:latest
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - AUTH_SERVICE_URL=http://auth-service:8088
+      - API_SERVICE_URL=http://api-service:8089
+      - CONSENSUS_SERVICE_URL=http://consensus-service:8080
+      - VM_MANAGER_URL=http://vm-manager-service:8081
+    depends_on:
+      - auth-service
+      - api-service
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  auth-service:
+    build:
+      context: ./services/auth
+      dockerfile: Dockerfile
+    ports:
+      - "8088:8088"
+    environment:
+      - JWT_SECRET=your-jwt-secret-key
+      - REDIS_URL=redis://cache-service:6379
+    depends_on:
+      - cache-service
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  api-service:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    ports:
+      - "8089:8089"
+    environment:
+      - CONSENSUS_SERVICE_URL=http://consensus-service:8080
+      - VM_MANAGER_URL=http://vm-manager-service:8081
+      - CHAIN_MANAGER_URL=http://chain-manager-service:8082
+      - VALIDATOR_SERVICE_URL=http://validator-service:8083
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  health-service:
+    build:
+      context: ./services/health
+      dockerfile: Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      - SERVICES_TO_CHECK=consensus-service:8080,vm-manager-service:8081,chain-manager-service:8082
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  metrics-service:
+    build:
+      context: ./services/metrics
+      dockerfile: Dockerfile
+    ports:
+      - "8091:8091"
+    environment:
+      - PROMETHEUS_URL=http://prometheus:9090
+    depends_on:
+      - prometheus
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  # Infrastructure Services
+  config-service:
+    build:
+      context: ./services/config
+      dockerfile: Dockerfile
+    ports:
+      - "8092:8092"
+    volumes:
+      - ./config:/app/config
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  # Monitoring Stack
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+    environment:
+      - COLLECTOR_ZIPKIN_HTTP_PORT=9411
+    networks:
+      - avalanche-network
+    restart: unless-stopped
+
+volumes:
+  vm-storage:
+  state-db-data:
+  block-db-data:
+  cache-data:
+  queue-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  avalanche-network:
+    driver: bridge 

@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: avalanche-core
+  labels:
+    tier: core
+    app.kubernetes.io/name: avalanche
+    app.kubernetes.io/component: core
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: avalanche-network
+  labels:
+    tier: network
+    app.kubernetes.io/name: avalanche
+    app.kubernetes.io/component: network
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: avalanche-storage
+  labels:
+    tier: storage
+    app.kubernetes.io/name: avalanche
+    app.kubernetes.io/component: storage
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: avalanche-monitoring
+  labels:
+    tier: monitoring
+    app.kubernetes.io/name: avalanche
+    app.kubernetes.io/component: monitoring
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: avalanche-gateway
+  labels:
+    tier: gateway
+    app.kubernetes.io/name: avalanche
+    app.kubernetes.io/component: gateway 

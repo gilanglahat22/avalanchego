@@ -1,0 +1,70 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'avalanche-microservices'
+
+rule_files:
+  - "avalanche_rules.yml"
+
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Consensus Service
+  - job_name: 'consensus-service'
+    static_configs:
+      - targets: ['consensus-service:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # VM Manager Service
+  - job_name: 'vm-manager-service'
+    static_configs:
+      - targets: ['vm-manager-service:8081']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # P2P Network Service
+  - job_name: 'p2p-network-service'
+    static_configs:
+      - targets: ['p2p-network-service:8084']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # API Gateway
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # PostgreSQL State Database
+  - job_name: 'state-database'
+    static_configs:
+      - targets: ['state-database:5432']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # PostgreSQL Block Database
+  - job_name: 'block-database'
+    static_configs:
+      - targets: ['block-database:5432']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Redis Cache Service
+  - job_name: 'cache-service'
+    static_configs:
+      - targets: ['cache-service:6379']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Redis Message Queue
+  - job_name: 'message-queue'
+    static_configs:
+      - targets: ['message-queue:6379']
+    metrics_path: '/metrics'
+    scrape_interval: 30s 
