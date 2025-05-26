@@ -5,7 +5,7 @@ metadata:
   namespace: avalanche-gateway
   labels:
     app: api-gateway
-    version: v1.0.0
+    tier: gateway
 spec:
   replicas: 3
   selector:
@@ -15,73 +15,43 @@ spec:
     metadata:
       labels:
         app: api-gateway
-        version: v1.0.0
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8000"
-        prometheus.io/path: "/metrics"
-        sidecar.istio.io/inject: "true"
+        tier: gateway
     spec:
-      serviceAccountName: avalanche-gateway-service-account
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: In
-                  values:
-                  - api-gateway
-              topologyKey: kubernetes.io/hostname
       containers:
       - name: api-gateway
         image: avalanche/api-gateway:v1.0.0
-        imagePullPolicy: IfNotPresent
         ports:
-        - name: http
-          containerPort: 8000
-          protocol: TCP
+        - containerPort: 8080
+          name: http
         env:
-        - name: AUTH_SERVICE_URL
-          value: "http://auth-service.avalanche-gateway:8088"
-        - name: API_SERVICE_URL
-          value: "http://api-service.avalanche-gateway:8089"
-        - name: CONSENSUS_SERVICE_URL
-          value: "http://consensus-service.avalanche-core:8080"
-        - name: VM_MANAGER_URL
-          value: "http://vm-manager-service.avalanche-core:8081"
-        - name: CHAIN_MANAGER_URL
-          value: "http://chain-manager-service.avalanche-core:8082"
-        - name: VALIDATOR_SERVICE_URL
-          value: "http://validator-service.avalanche-core:8083"
-        - name: REDIS_URL
-          value: "redis://cache-service.avalanche-storage:6379"
+        - name: PORT
+          value: "8080"
         - name: JWT_SECRET
           valueFrom:
             secretKeyRef:
               name: api-gateway-secrets
               key: jwt-secret
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
+        - name: REDIS_URL
+          value: "redis://cache-service.avalanche-storage.svc.cluster.local:6379"
+        - name: CONSENSUS_SERVICE_URL
+          value: "http://consensus-service.avalanche-core.svc.cluster.local:8080"
+        - name: VM_MANAGER_URL
+          value: "http://vm-manager-service.avalanche-core.svc.cluster.local:8081"
+        - name: CHAIN_MANAGER_URL
+          value: "http://chain-manager-service.avalanche-core.svc.cluster.local:8082"
+        - name: VALIDATOR_SERVICE_URL
+          value: "http://validator-service.avalanche-core.svc.cluster.local:8083"
         resources:
           requests:
-            cpu: 500m
-            memory: 1Gi
+            cpu: 300m
+            memory: 512Mi
           limits:
             cpu: 1000m
-            memory: 2Gi
+            memory: 1Gi
         livenessProbe:
           httpGet:
             path: /health
-            port: http
+            port: 8080
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
@@ -89,37 +59,21 @@ spec:
         readinessProbe:
           httpGet:
             path: /ready
-            port: http
-          initialDelaySeconds: 10
+            port: 8080
+          initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 3
         startupProbe:
           httpGet:
-            path: /startup
-            port: http
+            path: /health
+            port: 8080
           initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 30
-        volumeMounts:
-        - name: config
-          mountPath: /app/config
-          readOnly: true
-        - name: tls-certs
-          mountPath: /etc/ssl/certs
-          readOnly: true
-      volumes:
-      - name: config
-        configMap:
-          name: api-gateway-config
-      - name: tls-certs
-        secret:
-          secretName: api-gateway-tls
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
 ---
 apiVersion: v1
 kind: Service
@@ -128,227 +82,45 @@ metadata:
   namespace: avalanche-gateway
   labels:
     app: api-gateway
+    tier: gateway
 spec:
   selector:
     app: api-gateway
   ports:
   - name: http
-    port: 8000
-    targetPort: http
+    port: 80
+    targetPort: 8080
     protocol: TCP
   type: ClusterIP
 ---
-apiVersion: v1
-kind: ConfigMap
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
-  name: api-gateway-config
+  name: api-gateway-ingress
   namespace: avalanche-gateway
-data:
-  gateway.yaml: |
-    server:
-      port: 8000
-      readTimeout: 30s
-      writeTimeout: 30s
-      idleTimeout: 120s
-      
-    cors:
-      allowedOrigins:
-        - "*"
-      allowedMethods:
-        - GET
-        - POST
-        - PUT
-        - DELETE
-        - OPTIONS
-      allowedHeaders:
-        - "*"
-      
-    rateLimit:
-      enabled: true
-      requestsPerSecond: 100
-      burst: 200
-      
-    auth:
-      enabled: true
-      jwtSecret: "${JWT_SECRET}"
-      tokenExpiry: 24h
-      
-    routes:
-      - path: "/api/v1/consensus/*"
-        target: "${CONSENSUS_SERVICE_URL}"
-        methods: ["GET", "POST"]
-        auth: true
-        
-      - path: "/api/v1/vm/*"
-        target: "${VM_MANAGER_URL}"
-        methods: ["GET", "POST", "PUT", "DELETE"]
-        auth: true
-        
-      - path: "/api/v1/chain/*"
-        target: "${CHAIN_MANAGER_URL}"
-        methods: ["GET", "POST"]
-        auth: true
-        
-      - path: "/api/v1/validator/*"
-        target: "${VALIDATOR_SERVICE_URL}"
-        methods: ["GET", "POST"]
-        auth: true
-        
-      - path: "/api/v1/auth/*"
-        target: "${AUTH_SERVICE_URL}"
-        methods: ["POST"]
-        auth: false
-        
-    logging:
-      level: info
-      format: json
-      
-    metrics:
-      enabled: true
-      port: 8000
-      path: /metrics
-      
-    tracing:
-      enabled: true
-      jaegerEndpoint: "http://jaeger.avalanche-monitoring:14268/api/traces"
----
-apiVersion: networking.istio.io/v1beta1
-kind: Gateway
-metadata:
-  name: avalanche-gateway
-  namespace: avalanche-gateway
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
 spec:
-  selector:
-    istio: ingressgateway
-  servers:
-  - port:
-      number: 80
-      name: http
-      protocol: HTTP
-    hosts:
+  tls:
+  - hosts:
     - api.avalanche.local
-    - "*.avalanche.local"
-  - port:
-      number: 443
-      name: https
-      protocol: HTTPS
-    tls:
-      mode: SIMPLE
-      credentialName: avalanche-tls-secret
-    hosts:
-    - api.avalanche.local
-    - "*.avalanche.local"
----
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: avalanche-vs
-  namespace: avalanche-gateway
-spec:
-  hosts:
-  - api.avalanche.local
-  - "*.avalanche.local"
-  gateways:
-  - avalanche-gateway
-  http:
-  - match:
-    - uri:
-        prefix: /api/v1/consensus
-    route:
-    - destination:
-        host: consensus-service.avalanche-core.svc.cluster.local
-        port:
-          number: 8080
-    timeout: 30s
-    retries:
-      attempts: 3
-      perTryTimeout: 10s
-      
-  - match:
-    - uri:
-        prefix: /api/v1/vm
-    route:
-    - destination:
-        host: vm-manager-service.avalanche-core.svc.cluster.local
-        port:
-          number: 8081
-    timeout: 30s
-    retries:
-      attempts: 3
-      perTryTimeout: 10s
-      
-  - match:
-    - uri:
-        prefix: /api/v1/chain
-    route:
-    - destination:
-        host: chain-manager-service.avalanche-core.svc.cluster.local
-        port:
-          number: 8082
-    timeout: 30s
-    retries:
-      attempts: 3
-      perTryTimeout: 10s
-      
-  - match:
-    - uri:
-        prefix: /api/v1/validator
-    route:
-    - destination:
-        host: validator-service.avalanche-core.svc.cluster.local
-        port:
-          number: 8083
-    timeout: 30s
-    retries:
-      attempts: 3
-      perTryTimeout: 10s
-      
-  - match:
-    - uri:
-        prefix: /api/v1/auth
-    route:
-    - destination:
-        host: auth-service.avalanche-gateway.svc.cluster.local
-        port:
-          number: 8088
-    timeout: 30s
-    
-  - match:
-    - uri:
-        prefix: /
-    route:
-    - destination:
-        host: api-gateway.avalanche-gateway.svc.cluster.local
-        port:
-          number: 8000
----
-apiVersion: networking.istio.io/v1beta1
-kind: DestinationRule
-metadata:
-  name: avalanche-destination-rules
-  namespace: avalanche-gateway
-spec:
-  host: "*.avalanche-core.svc.cluster.local"
-  trafficPolicy:
-    loadBalancer:
-      simple: LEAST_CONN
-    connectionPool:
-      tcp:
-        maxConnections: 100
-      http:
-        http1MaxPendingRequests: 50
-        maxRequestsPerConnection: 10
-    circuitBreaker:
-      consecutiveErrors: 3
-      interval: 30s
-      baseEjectionTime: 30s
-      maxEjectionPercent: 50
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: avalanche-gateway-service-account
-  namespace: avalanche-gateway
+    secretName: api-gateway-tls
+  rules:
+  - host: api.avalanche.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: api-gateway
+            port:
+              number: 80
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -386,5 +158,112 @@ spec:
       stabilizationWindowSeconds: 60
       policies:
       - type: Percent
-        value: 50
-        periodSeconds: 60 
+        value: 100
+        periodSeconds: 60
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway-pdb
+  namespace: avalanche-gateway
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: api-gateway-secrets
+  namespace: avalanche-gateway
+type: Opaque
+data:
+  jwt-secret: YXZhbGFuY2hlLWp3dC1zZWNyZXQtdmVyeS1sb25nLWFuZC1zZWN1cmUtc3RyaW5n # avalanche-jwt-secret-very-long-and-secure-string (base64)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-gateway-config
+  namespace: avalanche-gateway
+data:
+  config.yaml: |
+    gateway:
+      port: 8080
+      timeout: 30s
+      max_request_size: 10MB
+      
+    rate_limiting:
+      requests_per_second: 100
+      burst_size: 200
+      
+    cors:
+      allowed_origins:
+        - "*"
+      allowed_methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+      allowed_headers:
+        - "*"
+      
+    routes:
+      - path: "/api/v1/consensus"
+        target: "consensus-service"
+        auth_required: true
+      - path: "/api/v1/vm"
+        target: "vm-manager-service"
+        auth_required: true
+      - path: "/api/v1/chain"
+        target: "chain-manager-service"
+        auth_required: true
+      - path: "/api/v1/validator"
+        target: "validator-service"
+        auth_required: true
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-gateway-network-policy
+  namespace: avalanche-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from: []
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: avalanche-core
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081
+    - protocol: TCP
+      port: 8082
+    - protocol: TCP
+      port: 8083
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: avalanche-storage
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53 

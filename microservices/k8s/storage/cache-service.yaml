@@ -1,0 +1,208 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache-service
+  namespace: avalanche-storage
+  labels:
+    app: cache-service
+    tier: storage
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cache-service
+  template:
+    metadata:
+      labels:
+        app: cache-service
+        tier: storage
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+          name: redis
+        command:
+        - redis-server
+        - /etc/redis/redis.conf
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: cache-credentials
+              key: password
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        volumeMounts:
+        - name: redis-config
+          mountPath: /etc/redis
+        - name: redis-data
+          mountPath: /data
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-config
+      - name: redis-data
+        emptyDir: {}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache-service
+  namespace: avalanche-storage
+  labels:
+    app: cache-service
+    tier: storage
+spec:
+  selector:
+    app: cache-service
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: avalanche-storage
+data:
+  redis.conf: |
+    # Redis configuration for Avalanche microservices
+    bind 0.0.0.0
+    port 6379
+    
+    # Memory management
+    maxmemory 800mb
+    maxmemory-policy allkeys-lru
+    
+    # Persistence
+    save 900 1
+    save 300 10
+    save 60 10000
+    
+    # Security
+    # requirepass will be set via environment variable
+    
+    # Logging
+    loglevel notice
+    
+    # Performance
+    tcp-keepalive 300
+    timeout 0
+    
+    # Append only file
+    appendonly yes
+    appendfsync everysec
+    
+    # Slow log
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cache-credentials
+  namespace: avalanche-storage
+type: Opaque
+data:
+  password: YXZhbGFuY2hlLWNhY2hlLXBhc3N3b3Jk # avalanche-cache-password (base64)
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cache-hpa
+  namespace: avalanche-storage
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cache-service
+  minReplicas: 3
+  maxReplicas: 6
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cache-pdb
+  namespace: avalanche-storage
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: cache-service
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cache-network-policy
+  namespace: avalanche-storage
+spec:
+  podSelector:
+    matchLabels:
+      app: cache-service
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: avalanche-core
+    - namespaceSelector:
+        matchLabels:
+          name: avalanche-gateway
+    - namespaceSelector:
+        matchLabels:
+          name: avalanche-network
+    ports:
+    - protocol: TCP
+      port: 6379
+  egress:
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53 

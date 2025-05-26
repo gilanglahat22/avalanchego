@@ -5,7 +5,7 @@ metadata:
   namespace: avalanche-storage
   labels:
     app: state-database
-    version: v1.0.0
+    tier: storage
 spec:
   serviceName: state-database
   replicas: 3
@@ -16,40 +16,14 @@ spec:
     metadata:
       labels:
         app: state-database
-        version: v1.0.0
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9187"
-        prometheus.io/path: "/metrics"
+        tier: storage
     spec:
-      serviceAccountName: avalanche-storage-service-account
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchExpressions:
-              - key: app
-                operator: In
-                values:
-                - state-database
-            topologyKey: kubernetes.io/hostname
-        nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            preference:
-              matchExpressions:
-              - key: workload
-                operator: In
-                values:
-                - storage
       containers:
       - name: postgres
         image: postgres:15-alpine
-        imagePullPolicy: IfNotPresent
         ports:
-        - name: postgres
-          containerPort: 5432
-          protocol: TCP
+        - containerPort: 5432
+          name: postgres
         env:
         - name: POSTGRES_DB
           value: "avalanche_state"
@@ -65,98 +39,49 @@ spec:
               key: password
         - name: PGDATA
           value: /var/lib/postgresql/data/pgdata
-        - name: POD_IP
-          valueFrom:
-            fieldRef:
-              fieldPath: status.podIP
         resources:
           requests:
             cpu: 1000m
-            memory: 4Gi
+            memory: 2Gi
           limits:
             cpu: 2000m
-            memory: 8Gi
+            memory: 4Gi
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        - name: postgres-config
+          mountPath: /etc/postgresql
         livenessProbe:
           exec:
             command:
-            - /bin/sh
-            - -c
-            - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
+            - pg_isready
+            - -U
+            - $(POSTGRES_USER)
+            - -d
+            - $(POSTGRES_DB)
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
-          failureThreshold: 6
+          failureThreshold: 3
         readinessProbe:
           exec:
             command:
-            - /bin/sh
-            - -c
-            - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
+            - pg_isready
+            - -U
+            - $(POSTGRES_USER)
+            - -d
+            - $(POSTGRES_DB)
           initialDelaySeconds: 5
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 6
-        startupProbe:
-          exec:
-            command:
-            - /bin/sh
-            - -c
-            - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
-          initialDelaySeconds: 10
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 30
-        volumeMounts:
-        - name: state-data
-          mountPath: /var/lib/postgresql/data
-        - name: config
-          mountPath: /etc/postgresql/postgresql.conf
-          subPath: postgresql.conf
-          readOnly: true
-        - name: init-scripts
-          mountPath: /docker-entrypoint-initdb.d
-          readOnly: true
-      - name: postgres-exporter
-        image: prometheuscommunity/postgres-exporter:latest
-        imagePullPolicy: IfNotPresent
-        ports:
-        - name: metrics
-          containerPort: 9187
-          protocol: TCP
-        env:
-        - name: DATA_SOURCE_NAME
-          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:5432/avalanche_state?sslmode=disable"
-        - name: POSTGRES_USER
-          valueFrom:
-            secretKeyRef:
-              name: database-credentials
-              key: username
-        - name: POSTGRES_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: database-credentials
-              key: password
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-          limits:
-            cpu: 200m
-            memory: 256Mi
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
       volumes:
-      - name: config
+      - name: postgres-config
         configMap:
           name: postgres-config
-      - name: init-scripts
-        configMap:
-          name: postgres-init-scripts
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 999
-        fsGroup: 999
   volumeClaimTemplates:
   - metadata:
-      name: state-data
+      name: postgres-data
     spec:
       accessModes: ["ReadWriteOnce"]
       storageClassName: fast-ssd
@@ -171,36 +96,35 @@ metadata:
   namespace: avalanche-storage
   labels:
     app: state-database
+    tier: storage
 spec:
   selector:
     app: state-database
   ports:
   - name: postgres
     port: 5432
-    targetPort: postgres
-    protocol: TCP
-  - name: metrics
-    port: 9187
-    targetPort: metrics
+    targetPort: 5432
     protocol: TCP
   type: ClusterIP
+  clusterIP: None
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: state-database-headless
+  name: state-database-read
   namespace: avalanche-storage
   labels:
     app: state-database
+    tier: storage
 spec:
-  clusterIP: None
   selector:
     app: state-database
   ports:
   - name: postgres
     port: 5432
-    targetPort: postgres
+    targetPort: 5432
     protocol: TCP
+  type: ClusterIP
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -209,24 +133,25 @@ metadata:
   namespace: avalanche-storage
 data:
   postgresql.conf: |
-    # PostgreSQL configuration for AvalancheGo State Database
-    
-    # Connection Settings
+    # PostgreSQL configuration for Avalanche microservices
     listen_addresses = '*'
     port = 5432
     max_connections = 200
-    
-    # Memory Settings
-    shared_buffers = 2GB
-    effective_cache_size = 6GB
-    work_mem = 64MB
-    maintenance_work_mem = 512MB
-    
-    # WAL Settings
-    wal_level = replica
-    max_wal_size = 2GB
-    min_wal_size = 1GB
+    shared_buffers = 1GB
+    effective_cache_size = 3GB
+    maintenance_work_mem = 256MB
     checkpoint_completion_target = 0.9
+    wal_buffers = 16MB
+    default_statistics_target = 100
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    work_mem = 4MB
+    min_wal_size = 1GB
+    max_wal_size = 4GB
+    max_worker_processes = 8
+    max_parallel_workers_per_gather = 4
+    max_parallel_workers = 8
+    max_parallel_maintenance_workers = 4
     
     # Logging
     log_destination = 'stderr'
@@ -236,89 +161,29 @@ data:
     log_statement = 'all'
     log_min_duration_statement = 1000
     
-    # Performance
-    random_page_cost = 1.1
-    effective_io_concurrency = 200
-    
     # Replication
+    wal_level = replica
+    max_wal_senders = 3
+    max_replication_slots = 3
     hot_standby = on
-    max_replication_slots = 10
-    max_wal_senders = 10
+    
+  pg_hba.conf: |
+    # PostgreSQL Client Authentication Configuration File
+    local   all             all                                     trust
+    host    all             all             127.0.0.1/32            md5
+    host    all             all             ::1/128                 md5
+    host    all             all             0.0.0.0/0               md5
+    host    replication     all             0.0.0.0/0               md5
 ---
 apiVersion: v1
-kind: ConfigMap
+kind: Secret
 metadata:
-  name: postgres-init-scripts
+  name: database-credentials
   namespace: avalanche-storage
+type: Opaque
 data:
-  01-init-database.sql: |
-    -- Initialize AvalancheGo State Database
-    
-    -- Create extensions
-    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-    CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
-    
-    -- Create schemas
-    CREATE SCHEMA IF NOT EXISTS avalanche;
-    CREATE SCHEMA IF NOT EXISTS consensus;
-    CREATE SCHEMA IF NOT EXISTS vm;
-    
-    -- Create state tables
-    CREATE TABLE IF NOT EXISTS avalanche.blocks (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        block_id VARCHAR(64) UNIQUE NOT NULL,
-        parent_id VARCHAR(64),
-        height BIGINT NOT NULL,
-        timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
-        data JSONB NOT NULL,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );
-    
-    CREATE TABLE IF NOT EXISTS avalanche.transactions (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        tx_id VARCHAR(64) UNIQUE NOT NULL,
-        block_id VARCHAR(64) REFERENCES avalanche.blocks(block_id),
-        type VARCHAR(32) NOT NULL,
-        data JSONB NOT NULL,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );
-    
-    CREATE TABLE IF NOT EXISTS consensus.validators (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        node_id VARCHAR(64) UNIQUE NOT NULL,
-        stake BIGINT NOT NULL,
-        start_time TIMESTAMP WITH TIME ZONE NOT NULL,
-        end_time TIMESTAMP WITH TIME ZONE,
-        subnet_id VARCHAR(64),
-        active BOOLEAN DEFAULT true,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );
-    
-    CREATE TABLE IF NOT EXISTS vm.instances (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        vm_id VARCHAR(64) UNIQUE NOT NULL,
-        chain_id VARCHAR(64) NOT NULL,
-        vm_type VARCHAR(32) NOT NULL,
-        config JSONB,
-        status VARCHAR(16) DEFAULT 'active',
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );
-    
-    -- Create indexes
-    CREATE INDEX IF NOT EXISTS idx_blocks_height ON avalanche.blocks(height);
-    CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON avalanche.blocks(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_transactions_block_id ON avalanche.transactions(block_id);
-    CREATE INDEX IF NOT EXISTS idx_transactions_type ON avalanche.transactions(type);
-    CREATE INDEX IF NOT EXISTS idx_validators_node_id ON consensus.validators(node_id);
-    CREATE INDEX IF NOT EXISTS idx_validators_active ON consensus.validators(active);
-    CREATE INDEX IF NOT EXISTS idx_vm_instances_chain_id ON vm.instances(chain_id);
-    CREATE INDEX IF NOT EXISTS idx_vm_instances_status ON vm.instances(status);
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: avalanche-storage-service-account
-  namespace: avalanche-storage
+  username: cG9zdGdyZXM= # postgres (base64)
+  password: YXZhbGFuY2hlLWRiLXBhc3N3b3Jk # avalanche-db-password (base64)
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -326,7 +191,38 @@ metadata:
   name: state-database-pdb
   namespace: avalanche-storage
 spec:
-  maxUnavailable: 1
+  minAvailable: 2
   selector:
     matchLabels:
-      app: state-database 
+      app: state-database
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: state-database-network-policy
+  namespace: avalanche-storage
+spec:
+  podSelector:
+    matchLabels:
+      app: state-database
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: avalanche-core
+    - namespaceSelector:
+        matchLabels:
+          name: avalanche-gateway
+    ports:
+    - protocol: TCP
+      port: 5432
+  egress:
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53 
